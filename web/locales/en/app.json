@@ -1448,6 +1448,7 @@
   "Change type": "Change type",
   "Generating {{type}}…": "Generating {{type}}…",
   "{{type}} block failed": "{{type}} block failed",
+  "Downgraded from {{original}} to {{type}}": "Downgraded from {{original}} to {{type}}",
   "not retryable": "not retryable",
   "(Animation payload is empty)": "(Animation payload is empty)",
   "Animation frame": "Animation frame",

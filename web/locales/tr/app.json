@@ -1325,6 +1325,7 @@
   "Change type": "Türü değiştir",
   "Generating {{type}}…": "{{type}} oluşturuluyor…",
   "{{type}} block failed": "{{type}} bloğu başarısız oldu",
+  "Downgraded from {{original}} to {{type}}": "{{original}} öğesinden {{type}} öğesine düşürüldü",
   "not retryable": "yeniden denenemez",
   "(Animation payload is empty)": "(Animasyon verisi boş)",
   "Animation frame": "Animasyon karesi",

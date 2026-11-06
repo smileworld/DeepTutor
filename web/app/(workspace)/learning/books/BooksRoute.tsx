@@ -70,6 +70,7 @@ const PAGE_SCOPED_EVENTS = new Set([
   'page_compile_started',
   'block_ready',
   'block_error',
+  'block_downgraded',
   'page_compiled',
 ])
 

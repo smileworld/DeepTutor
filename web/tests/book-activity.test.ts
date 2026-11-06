@@ -138,6 +138,33 @@ test("the live stream names the block being written, over the durable status", (
   assert.equal(activity.live, true);
 });
 
+test("a downgrade event does not add a third attempt to the progress counter", () => {
+  // The failed attempt and the successful replacement each emit their own
+  // block_error / block_ready. `block_downgraded` sits between them and must
+  // be a no-op, otherwise the reader sees "3/1 blocks".
+  const progress = feed([
+    { type: "progress", metadata: { kind: "page_compile_started", page_id: "pg_b" } },
+    { type: "progress", metadata: { kind: "page_planned", page_id: "pg_b", block_types: ["quiz"] } },
+    { type: "progress", metadata: { kind: "block_started", page_id: "pg_b", block_type: "quiz" } },
+    { type: "progress", metadata: { kind: "block_error", page_id: "pg_b", block_type: "quiz" } },
+    {
+      type: "progress",
+      metadata: {
+        kind: "block_downgraded",
+        page_id: "pg_b",
+        original_type: "quiz",
+        type: "flash_cards",
+        reason: "quiz timed out",
+      },
+    },
+    { type: "progress", metadata: { kind: "block_started", page_id: "pg_b", block_type: "flash_cards" } },
+    { type: "progress", metadata: { kind: "block_ready", page_id: "pg_b", block_type: "flash_cards" } },
+  ]);
+
+  assert.equal(progress.pages["pg_b"].done, 2);
+  assert.equal(progress.pages["pg_b"].planned?.length, 1);
+});
+
 test("pausing stops every chapter reporting live work", () => {
   const progress = feed([
     { type: "progress", metadata: { kind: "page_compile_started", page_id: "pg_b" } },

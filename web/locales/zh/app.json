@@ -1570,6 +1570,7 @@
   "Change type": "更改类型",
   "Generating {{type}}…": "正在生成{{type}}…",
   "{{type}} block failed": "{{type}} 内容块生成失败",
+  "Downgraded from {{original}} to {{type}}": "已从{{original}}降级为{{type}}",
   "not retryable": "不可重试",
   "(Animation payload is empty)": "（动画内容为空）",
   "Animation frame": "动画帧",

@@ -1801,6 +1801,7 @@
   "Change type": "Changer le type",
   "Generating {{type}}…": "Génération : {{type}}…",
   "{{type}} block failed": "Échec du bloc {{type}}",
+  "Downgraded from {{original}} to {{type}}": "Rétrogradé de {{original}} vers {{type}}",
   "not retryable": "non réessayable",
   "(Animation payload is empty)": "(Le contenu de l'animation est vide)",
   "Animation frame": "Image de l'animation",
