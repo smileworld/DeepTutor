@@ -323,9 +323,23 @@ class ConfigTestRunner:
         )
         run.emit("info", f"Request target: {llm_config.base_url}")
         # Mirror the production calls (conversation titles, composer starting
-        # points): short prompt, tiny token budget, no context-window probe.
-        run.emit("info", "Generating a title-style probe response (short, bounded).")
-        token_kwargs: dict[str, Any] = get_token_limit_kwargs(llm_config.model, max_tokens=80)
+        # points): short prompt, no context-window probe, and the *same*
+        # negotiated budget function. A hardcoded 80 here used to starve
+        # reasoning models while production kept working via its fallback.
+        from deeptutor.services.llm.token_budget import resolve_output_token_budget
+
+        budget = resolve_output_token_budget(
+            llm_config.model,
+            binding=llm_config.binding,
+            reasoning_effort=llm_config.reasoning_effort,
+        )
+        run.emit(
+            "info",
+            f"Generating a title-style probe response (short, bounded, {budget} tokens).",
+        )
+        token_kwargs: dict[str, Any] = get_token_limit_kwargs(
+            llm_config.model, max_tokens=budget
+        )
         response = await complete_with_config(
             llm_config,
             prompt=(

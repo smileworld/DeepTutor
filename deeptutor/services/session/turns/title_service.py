@@ -105,26 +105,42 @@ class SessionTitleService:
                 )
 
             async def _collect_title() -> str:
+                from deeptutor.services.llm import get_llm_config
+                from deeptutor.services.llm.config import get_token_limit_kwargs
+                from deeptutor.services.llm.token_budget import resolve_output_token_budget
+
+                # This runs inside task_llm_scope(SESSION_TITLE), so the scoped
+                # config is the task model when one is configured. Settings'
+                # task probe uses the same budget function — no more 80-token
+                # starvation of reasoning models in one path only.
+                config = get_llm_config()
+                budget = resolve_output_token_budget(
+                    getattr(config, "model", None),
+                    binding=getattr(config, "binding", None),
+                    reasoning_effort=getattr(config, "reasoning_effort", None),
+                )
+                token_kwargs = get_token_limit_kwargs(
+                    getattr(config, "model", "") or "", max_tokens=budget
+                )
+
                 if os.getenv("DEEPTUTOR_CHAT_ENGINE") == "typescript-native":
                     from deeptutor.runtime.ts_engine.completion import complete_native
                     from deeptutor.runtime.ts_engine.config import compatibility_reason
-                    from deeptutor.services.llm import get_llm_config
 
-                    config = get_llm_config()
                     if not compatibility_reason(config):
                         return await complete_native(
                             config,
                             system=sys_prompt,
                             prompt=user_prompt,
                             temperature=0.3,
-                            max_tokens=80,
+                            max_tokens=budget,
                         )
                 buf: list[str] = []
                 async for c in llm_stream(
                     prompt=user_prompt,
                     system_prompt=sys_prompt,
                     temperature=0.3,
-                    max_tokens=80,
+                    **token_kwargs,
                 ):
                     buf.append(c)
                 return "".join(buf)
