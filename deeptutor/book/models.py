@@ -531,6 +531,12 @@ class Book(BaseModel):
     knowledge_bases: list[str] = Field(default_factory=list)
     language: str = "en"
     depth: BookDepth = BookDepth.STANDARD
+    # Optional per-book LLM override. ID-only reference (profile_id / model_id /
+    # reasoning_effort), same shape as a chat session's LLMSelection; no secret
+    # is ever persisted here. ``None`` inherits the global active LLM. Because
+    # ``Book`` uses ``extra="allow"``, manifests written before this field was
+    # added stay readable without any migration.
+    model_selection: dict[str, Any] | None = None
     page_count: int = 0
     chapter_count: int = 0
     created_at: float = Field(default_factory=_now)

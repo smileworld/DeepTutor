@@ -80,6 +80,15 @@ class CreateBookRequest(BaseModel):
     language: str = Field(default="en")
     fallback_language: str = Field(default="en")
     depth: str = Field(default="standard")
+    # Optional per-book LLM pin (ID-only: profile_id / model_id /
+    # reasoning_effort). ``None`` inherits the global active LLM.
+    model_selection: dict[str, Any] | None = None
+
+
+class SetBookModelSelectionRequest(BaseModel):
+    book_id: str
+    model_selection: dict[str, Any] | None = None
+    expected_revision: int | None = Field(default=None, ge=1)
 
 
 class ConfirmProposalRequest(BaseModel):
@@ -850,13 +859,50 @@ async def create_book(req: CreateBookRequest) -> dict[str, Any]:
             language=req.language,
             fallback_language=req.fallback_language,
             depth=req.depth,
+            model_selection=req.model_selection,
         )
+    except ValueError as exc:
+        # A malformed model reference is a client error, not a server failure.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.error(f"create_book failed: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc))
     return {
         "book": book.model_dump(mode="json"),
         "proposal": proposal.model_dump(mode="json"),
+    }
+
+
+@router.post("/books/set-model-selection")
+async def set_book_model_selection(req: SetBookModelSelectionRequest) -> dict[str, Any]:
+    """Pin (or clear) the LLM used by one book without touching global settings.
+
+    Only the *selection* is persisted; already-generated content is left alone,
+    and the new model takes effect on the next compile / regenerate. Pass
+    ``model_selection: null`` to fall back to the global active LLM.
+    """
+    from deeptutor.book.model_scope import normalize_model_selection
+
+    try:
+        selection = normalize_model_selection(req.model_selection)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    resolved = _resolve_book_or_404(req.book_id, edit=True)
+    revision = _claim_content_mutation(
+        resolved, req.book_id, req.expected_revision, "model_selection"
+    )
+    book = resolved.engine.load_book(req.book_id)
+    if book is None:
+        raise HTTPException(status_code=404, detail="Book not found")
+    book.model_selection = selection
+    book.updated_at = time.time()
+    storage = getattr(resolved.engine, "storage", None) or get_book_storage()
+    storage.save_book(book)
+    return {
+        "book_id": req.book_id,
+        "model_selection": selection,
+        "revision": revision,
     }
 
 
