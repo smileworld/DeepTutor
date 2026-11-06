@@ -24,6 +24,7 @@ from deeptutor.runtime.home import (
     DEEPTUTOR_HOME_ENV,
     get_runtime_data_root,
     get_runtime_home,
+    runtime_flag,
 )
 from deeptutor.services.provider_registry import (
     effective_backend,
@@ -115,6 +116,29 @@ def _cache_snapshot() -> dict[str, Any]:
     }
 
 
+def _unified_summary() -> dict[str, Any]:
+    """Non-sensitive projection of the L4b unified read entry point.
+
+    ``RuntimeConfig.catalog`` may contain provider credentials, so this never
+    returns its contents — only the resolved paths, provenance and counts.
+    """
+
+    from deeptutor.services.config.runtime_config import get_runtime_config
+
+    snapshot = get_runtime_config()
+    return {
+        "resolved_home": str(snapshot.home),
+        "resolved_data_root": str(snapshot.data_root),
+        "settings_dir": str(snapshot.settings_dir),
+        "catalog_path": str(snapshot.catalog_path),
+        "main_config_path": str(snapshot.main_config_path),
+        "sources": dict(snapshot.sources),
+        "catalog_connections": len(snapshot.catalog.get("connections") or []),
+        "catalog_path_exists": snapshot.catalog_path.exists(),
+        "main_config_path_exists": snapshot.main_config_path.exists(),
+    }
+
+
 def collect_config_sources() -> dict[str, Any]:
     """Return a snapshot describing the provenance of live configuration."""
     from deeptutor.services.config import get_model_catalog_service
@@ -194,6 +218,8 @@ def collect_config_sources() -> dict[str, Any]:
         ),
         "catalog": catalog_payload,
         "llm_runtime": llm_runtime,
+        "unified": _safe(_unified_summary),
+        "runtime_flags": {"ssot": runtime_flag("ssot")},
         "caches": _safe(_cache_snapshot),
         "env_keys": sorted(
             key for key in os.environ if key.startswith(_ENV_PREFIXES)
