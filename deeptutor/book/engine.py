@@ -314,6 +314,37 @@ def _with_book_sources(function):
     return guarded
 
 
+def _with_book_model_scope(function):
+    """Install ``Book.model_selection`` around every generation entry point.
+
+    Kept next to ``_with_book_sources`` so the two guards stay in the same
+    order at every call site. The scope is opened *before* the wrapped
+    coroutine creates any child task, which matters: ``compile_page`` spawns
+    ``_compile_page_now`` via ``asyncio.create_task``, and a new task copies
+    the ContextVar of its creator. Installing the book's model here therefore
+    covers both the background worker and a reader opening a page directly —
+    the worker itself only clears a leaked request scope and otherwise remains
+    untouched.
+
+    A book without ``model_selection`` inherits the live global config, so
+    pre-existing books behave exactly as before.
+    """
+    from functools import wraps
+    from inspect import signature
+
+    @wraps(function)
+    async def guarded(self, *args, **kwargs):
+        from .model_scope import book_llm_scope
+
+        bound = signature(function).bind(self, *args, **kwargs).arguments
+        book_id = bound.get("book_id")
+        book = self.storage.load_book(book_id) if book_id else None
+        with book_llm_scope(book):
+            return await function(self, *args, **kwargs)
+
+    return guarded
+
+
 class BookEngine:
     """Process-wide orchestrator for the Book Engine."""
 
@@ -478,9 +509,16 @@ class BookEngine:
         language: str = "en",
         fallback_language: str = "en",
         depth: str = BookDepth.STANDARD.value,
+        model_selection: dict[str, Any] | None = None,
         stream: StreamBus | None = None,
     ) -> tuple[Book, BookProposal]:
         """Capture inputs, run IdeationAgent, persist DRAFT book + proposal."""
+        from .model_scope import book_llm_scope, normalize_model_selection
+
+        # Validate before any LLM call or disk write: an unresolvable reference
+        # must be a 4xx at the API boundary, not a manifest that can never
+        # activate its own model.
+        selection = normalize_model_selection(model_selection)
         bus = stream or StreamBus()
         bstream = BookStream(bus)
         language = resolve_book_language(
@@ -507,7 +545,10 @@ class BookEngine:
                 "Generating book proposal…",
                 stage=STAGE_IDEATION,
             )
-            proposal = await self._run_ideation(ideation_ctx, language)
+            # Ideation is the first LLM call made for a book, so the pinned
+            # model has to be active here too — before the manifest even exists.
+            with book_llm_scope(selection):
+                proposal = await self._run_ideation(ideation_ctx, language)
 
             book = Book(
                 title=proposal.title,
@@ -517,6 +558,7 @@ class BookEngine:
                 knowledge_bases=book_inputs.knowledge_bases,
                 language=language,
                 depth=_coerce_depth(depth),
+                model_selection=selection,
                 chapter_count=proposal.estimated_chapters,
             )
             # Capture baseline KB fingerprints immediately so subsequent drift
@@ -557,6 +599,7 @@ class BookEngine:
 
     @workspace_writer
     @_with_book_sources
+    @_with_book_model_scope
     async def confirm_proposal(
         self,
         *,
@@ -891,6 +934,7 @@ class BookEngine:
 
     @workspace_writer
     @_with_book_sources
+    @_with_book_model_scope
     async def confirm_spine(
         self,
         *,
@@ -1210,6 +1254,7 @@ class BookEngine:
 
     # ── Stage 3-4: compile a single page (current page) ──────────────────
 
+    @_with_book_model_scope
     async def compile_page(
         self,
         *,
@@ -1439,7 +1484,10 @@ class BookEngine:
         # clearing it, every chapter this worker compiles for the rest of its
         # life would silently use that one request's model. Background
         # compilation belongs to the book, not to the call that started it, so
-        # it runs against the user's current configuration.
+        # it runs against the user's current configuration. A book that pins a
+        # model gets it from ``_with_book_model_scope`` on ``compile_page`` /
+        # ``regenerate_block`` instead — installed at the generation entry point
+        # so both the worker and direct reader requests see the same config.
         from deeptutor.services.llm.config import set_scoped_llm_config
 
         set_scoped_llm_config(None)
@@ -1593,6 +1641,7 @@ class BookEngine:
     # ── Block-level controls (Phase 1: regenerate single block) ─────────
 
     @_with_book_sources
+    @_with_book_model_scope
     async def regenerate_block(
         self,
         *,
@@ -1797,6 +1846,7 @@ class BookEngine:
     # ── Block CRUD operations (Phase 3) ────────────────────────────────
 
     @_with_book_sources
+    @_with_book_model_scope
     async def insert_block(
         self,
         *,
