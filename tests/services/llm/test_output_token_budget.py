@@ -4,6 +4,10 @@ The regression this guards against is a hardcoded ``max_tokens=80`` in one
 path only: Settings reported "Task model returned an empty response" while
 production quietly fell back to a truncated first message. Both call sites
 must go through ``resolve_output_token_budget``.
+
+A live probe on Zhipu ``glm-5.3-flash`` showed 80 is too tight even for a
+non-reasoning model (empty response), while 512 returned a normal title. The
+negotiated floor therefore applies to all models, not just reasoning ones.
 """
 
 from __future__ import annotations
@@ -16,8 +20,10 @@ import pytest
 
 from deeptutor.services.llm.config import get_token_limit_kwargs
 from deeptutor.services.llm.token_budget import (
+    ABSOLUTE_MAX_SHORT_OUTPUT_TOKENS,
     DEFAULT_SHORT_OUTPUT_TOKENS,
     REASONING_SHORT_OUTPUT_TOKENS,
+    SAFE_SHORT_OUTPUT_TOKENS,
     SHORT_OUTPUT_CAP_ENV,
     requires_reasoning_headroom,
     resolve_output_token_budget,
@@ -27,9 +33,12 @@ from deeptutor.services.llm.token_budget import (
 # --- pure budget negotiation ------------------------------------------------
 
 
-def test_plain_model_keeps_the_small_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_non_reasoning_model_still_gets_the_safe_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live-probe finding: 80 starved glm-5.3-flash even without reasoning."""
+
     monkeypatch.delenv(SHORT_OUTPUT_CAP_ENV, raising=False)
-    assert resolve_output_token_budget("glm-5.3-flash") == DEFAULT_SHORT_OUTPUT_TOKENS
+    assert DEFAULT_SHORT_OUTPUT_TOKENS == 80
+    assert resolve_output_token_budget("glm-5.3-flash") == SAFE_SHORT_OUTPUT_TOKENS
     assert not requires_reasoning_headroom("glm-5.3-flash")
 
 
@@ -46,25 +55,39 @@ def test_plain_model_keeps_the_small_budget(monkeypatch: pytest.MonkeyPatch) -> 
         "claude-sonnet-4-5",
     ],
 )
-def test_reasoning_models_get_headroom(
+def test_reasoning_models_get_extra_headroom(
     monkeypatch: pytest.MonkeyPatch, model: str
 ) -> None:
     monkeypatch.delenv(SHORT_OUTPUT_CAP_ENV, raising=False)
     assert requires_reasoning_headroom(model)
     assert resolve_output_token_budget(model) == REASONING_SHORT_OUTPUT_TOKENS
+    assert REASONING_SHORT_OUTPUT_TOKENS > SAFE_SHORT_OUTPUT_TOKENS
 
 
-def test_explicit_reasoning_effort_requests_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_reasoning_effort_requests_extra_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv(SHORT_OUTPUT_CAP_ENV, raising=False)
-    assert resolve_output_token_budget("plain-model", reasoning_effort="high") == 512
-    assert resolve_output_token_budget("plain-model", reasoning_effort="none") == 80
+    assert (
+        resolve_output_token_budget("plain-model", reasoning_effort="high")
+        == REASONING_SHORT_OUTPUT_TOKENS
+    )
+    assert (
+        resolve_output_token_budget("plain-model", reasoning_effort="none")
+        == SAFE_SHORT_OUTPUT_TOKENS
+    )
 
 
-def test_thinking_tags_capability_requests_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_thinking_tags_capability_requests_extra_headroom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import deeptutor.services.llm.token_budget as budget_module
 
     monkeypatch.setattr(budget_module, "has_thinking_tags", lambda binding, model: True)
-    assert resolve_output_token_budget("plain-model", binding="deepseek") == 512
+    assert (
+        resolve_output_token_budget("plain-model", binding="deepseek")
+        == REASONING_SHORT_OUTPUT_TOKENS
+    )
 
 
 def test_hard_cap_clamps_but_never_widens_a_request(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,12 +96,15 @@ def test_hard_cap_clamps_but_never_widens_a_request(monkeypatch: pytest.MonkeyPa
 
     # A wider cap cannot inflate an already negotiated budget...
     monkeypatch.setenv(SHORT_OUTPUT_CAP_ENV, "99999")
-    assert resolve_output_token_budget("deepseek-reasoner") == 512
-    # ...but a deliberately oversized request is still clamped to 4096.
-    assert resolve_output_token_budget("deepseek-reasoner", reasoning_budget=99999) == 4096
+    assert resolve_output_token_budget("deepseek-reasoner") == REASONING_SHORT_OUTPUT_TOKENS
+    # ...but a deliberately oversized request is still clamped to the absolute max.
+    assert (
+        resolve_output_token_budget("deepseek-reasoner", reasoning_budget=99999)
+        == ABSOLUTE_MAX_SHORT_OUTPUT_TOKENS
+    )
 
 
-def test_cap_below_base_is_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cap_below_the_floor_is_respected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(SHORT_OUTPUT_CAP_ENV, "40")
     assert resolve_output_token_budget("glm-5.3-flash") == 40
 
@@ -88,23 +114,23 @@ def test_invalid_cap_falls_back_to_the_default(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
     monkeypatch.setenv(SHORT_OUTPUT_CAP_ENV, value)
-    assert resolve_output_token_budget("deepseek-reasoner") == 512
+    assert resolve_output_token_budget("deepseek-reasoner") == REASONING_SHORT_OUTPUT_TOKENS
 
 
 def test_parameter_name_mapping_is_still_separate() -> None:
     """Negotiating the budget must not change the max_tokens/max_completion_tokens split."""
 
     budget = resolve_output_token_budget("o3-mini")
-    assert budget == 512
+    assert budget == REASONING_SHORT_OUTPUT_TOKENS
     assert get_token_limit_kwargs("o3-mini", max_tokens=budget) == {
-        "max_completion_tokens": 512
+        "max_completion_tokens": REASONING_SHORT_OUTPUT_TOKENS
     }
     assert get_token_limit_kwargs("glm-5.3-flash", max_tokens=80) == {"max_tokens": 80}
 
 
 def test_unknown_model_is_safe() -> None:
-    assert resolve_output_token_budget(None) == DEFAULT_SHORT_OUTPUT_TOKENS
-    assert resolve_output_token_budget("") == DEFAULT_SHORT_OUTPUT_TOKENS
+    assert resolve_output_token_budget(None) == SAFE_SHORT_OUTPUT_TOKENS
+    assert resolve_output_token_budget("") == SAFE_SHORT_OUTPUT_TOKENS
 
 
 # --- settings task probe really uses the shared function --------------------
@@ -113,7 +139,10 @@ def test_unknown_model_is_safe() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model", "expected"),
-    [("glm-5.3-flash", 80), ("glm-5.3-flashx", 512)],
+    [
+        ("glm-5.3-flash", SAFE_SHORT_OUTPUT_TOKENS),
+        ("glm-5.3-flashx", REASONING_SHORT_OUTPUT_TOKENS),
+    ],
 )
 async def test_task_probe_uses_negotiated_budget(
     monkeypatch: pytest.MonkeyPatch, model: str, expected: int
@@ -160,8 +189,8 @@ async def test_task_probe_uses_negotiated_budget(
 @pytest.mark.parametrize(
     ("model", "expected_key", "expected"),
     [
-        ("glm-5.3-flash", "max_tokens", 80),
-        ("o3-mini", "max_completion_tokens", 512),
+        ("glm-5.3-flash", "max_tokens", SAFE_SHORT_OUTPUT_TOKENS),
+        ("o3-mini", "max_completion_tokens", REASONING_SHORT_OUTPUT_TOKENS),
     ],
 )
 async def test_session_title_uses_negotiated_budget(
