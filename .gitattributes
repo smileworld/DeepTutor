@@ -16,3 +16,7 @@ docker-compose.*.yml text eol=lf
 *.toml text eol=lf
 *.cfg text eol=lf
 *.ini text eol=lf
+
+# Generated TypeScript contracts are compared byte-for-byte by `contracts:check`.
+# Keep them LF on Windows, where core.autocrlf=true would otherwise check out CRLF.
+web/contracts/generated/*.ts text eol=lf
