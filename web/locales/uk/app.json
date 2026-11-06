@@ -1305,6 +1305,7 @@
   "Change type": "Змінити тип",
   "Generating {{type}}…": "Генерація {{type}}…",
   "{{type}} block failed": "Не вдалося створити блок {{type}}",
+  "Downgraded from {{original}} to {{type}}": "Знижено з {{original}} до {{type}}",
   "not retryable": "не можна повторити",
   "(Animation payload is empty)": "(Дані анімації порожні)",
   "Animation frame": "Кадр анімації",

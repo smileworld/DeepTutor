@@ -317,6 +317,13 @@ export function reduceBookEvent(
         live: true,
       });
       break;
+    case "block_downgraded":
+      // The original attempt was already counted by `block_started`, and the
+      // replacement generator emits its own `block_started` / `block_ready`
+      // pair. Counting here as well would double-count one slot, so this event
+      // is deliberately a no-op for progress (the reader sees it as the
+      // durable notice inside the block instead).
+      break;
     case "block_ready":
     case "block_error":
       // Both advance the count: "3/5 blocks" is how much of the chapter has

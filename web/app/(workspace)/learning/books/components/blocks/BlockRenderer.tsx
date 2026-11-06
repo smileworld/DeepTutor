@@ -261,8 +261,38 @@ export default function BlockRenderer({
   ).trim();
   const showBridge = bridgeText.length > 0;
 
+  // L3: a block that could not be generated as planned is rewritten to a more
+  // robust type. That changes the content shape, so it must never be silent.
+  // This reads durable manifest metadata rather than the stream event: the
+  // notice survives a reload, and a reconnection replay cannot duplicate it.
+  const downgrade = block.metadata?.downgrade as
+    | { original_type?: string; downgraded_to?: string; reason?: string }
+    | undefined;
+  const showDowngrade = !!downgrade?.original_type;
+
   return (
     <div className="group relative" data-block-id={block.id}>
+      {showDowngrade && (
+        <div
+          data-block-downgraded={downgrade?.original_type ?? ""}
+          className="mb-3 flex items-start gap-2 rounded-xl border border-amber-300/70 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100"
+        >
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div className="min-w-0">
+            <div className="font-medium">
+              {t("Downgraded from {{original}} to {{type}}", {
+                original: t(downgrade?.original_type ?? ""),
+                type: t(downgrade?.downgraded_to ?? block.type),
+              })}
+            </div>
+            {downgrade?.reason && (
+              <div className="mt-0.5 break-words opacity-80">
+                {downgrade.reason}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {showBridge && (
         <div className="mb-3 text-[var(--foreground)]">
           <MarkdownRenderer content={bridgeText} variant="prose" />

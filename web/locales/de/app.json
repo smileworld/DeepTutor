@@ -1343,6 +1343,7 @@
   "Change type": "Typ ändern",
   "Generating {{type}}…": "{{type}} wird erzeugt…",
   "{{type}} block failed": "{{type}}-Block fehlgeschlagen",
+  "Downgraded from {{original}} to {{type}}": "Von {{original}} auf {{type}} herabgestuft",
   "not retryable": "nicht wiederholbar",
   "(Animation payload is empty)": "(Animationsdaten sind leer)",
   "Animation frame": "Animations-Frame",

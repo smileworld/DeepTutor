@@ -1325,6 +1325,7 @@
   "Change type": "種類を変更",
   "Generating {{type}}…": "{{type}} を生成中…",
   "{{type}} block failed": "{{type}} ブロックが失敗しました",
+  "Downgraded from {{original}} to {{type}}": "{{original}} から {{type}} にダウングレードしました",
   "not retryable": "再試行不可",
   "(Animation payload is empty)": "（アニメーションのデータが空です）",
   "Animation frame": "アニメーションフレーム",

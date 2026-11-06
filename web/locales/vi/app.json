@@ -1324,6 +1324,7 @@
   "Change type": "Đổi loại",
   "Generating {{type}}…": "Đang tạo {{type}}…",
   "{{type}} block failed": "Khối {{type}} thất bại",
+  "Downgraded from {{original}} to {{type}}": "Đã hạ cấp từ {{original}} xuống {{type}}",
   "not retryable": "không thể thử lại",
   "(Animation payload is empty)": "(Dữ liệu hoạt ảnh trống)",
   "Animation frame": "Khung hoạt ảnh",

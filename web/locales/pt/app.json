@@ -1324,6 +1324,7 @@
   "Change type": "Alterar tipo",
   "Generating {{type}}…": "Gerando {{type}}…",
   "{{type}} block failed": "Falha no bloco {{type}}",
+  "Downgraded from {{original}} to {{type}}": "Rebaixado de {{original}} para {{type}}",
   "not retryable": "não é possível tentar novamente",
   "(Animation payload is empty)": "(Os dados da animação estão vazios)",
   "Animation frame": "Quadro da animação",
