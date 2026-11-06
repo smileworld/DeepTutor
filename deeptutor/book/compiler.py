@@ -24,9 +24,16 @@ import asyncio
 from dataclasses import dataclass
 import logging
 import time
+from typing import Any
 
-from .agents.page_planner import SectionArchitect
+from .agents.page_planner import PLANNABLE_BLOCK_TYPES, SectionArchitect
 from .blocks.base import BlockContext, get_block_registry
+from .blocks.capabilities import (
+    capabilities_snapshot,
+    downgrade_map_for_book,
+    probe_registry,
+    record_capabilities,
+)
 from .blocks.text import generate_bridge_text
 from .models import (
     Block,
@@ -129,6 +136,16 @@ class CompilerOptions:
     block_retry_backoff_seconds: float = 2.0
     """Base delay before a retry; doubles per attempt."""
 
+    capability_probe: bool = True
+    """Probe generators before planning so unavailable block types are omitted."""
+
+    auto_downgrade: bool = True
+    """Convert a block that still fails to a more robust type (L3).
+
+    This is the kill switch for the whole behaviour. A book can also opt out
+    individually with ``Book.metadata["auto_downgrade"] = False``.
+    """
+
 
 class BookCompiler:
     """Compile a single page (or list of pages) end-to-end."""
@@ -147,6 +164,10 @@ class BookCompiler:
             llm_enabled=self.options.architect_llm_enabled,
         )
 
+    def _option(self, name: str, default: Any) -> Any:
+        """Read a compiler option, tolerating bare ``__new__`` test doubles."""
+        return getattr(getattr(self, "options", None), name, default)
+
     # ── Public API ───────────────────────────────────────────────────────
 
     async def compile_page(
@@ -162,6 +183,14 @@ class BookCompiler:
         exploration: ExplorationReport | None = None,
     ) -> Page:
         """Plan (if needed) and generate every block on *page*."""
+        # L3: resolve the book's downgrade policy once per page. It is data on
+        # the manifest (not global config), so two books can differ, and an
+        # empty map is a complete no-op for the rest of this method.
+        book = self.storage.load_book(book_id)
+        downgrades = (
+            downgrade_map_for_book(book) if self._option("auto_downgrade", True) else {}
+        )
+
         await stream.book_event(
             "page_compile_started",
             {"page_id": page.id, "chapter_id": chapter.id, "title": page.title},
@@ -214,6 +243,7 @@ class BookCompiler:
                     chapter=chapter,
                     language=language,
                     previous_block=prev,
+                    downgrade_map=downgrades,
                 )
 
         # Sequential keeps streaming order; concurrent if requested.
@@ -273,6 +303,7 @@ class BookCompiler:
         chapter: Chapter,
         language: str,
         previous_block: Block | None,
+        downgrade_map: dict[BlockType, BlockType] | None = None,
     ) -> None:
         await stream.book_event(
             "block_started",
@@ -291,6 +322,21 @@ class BookCompiler:
             logger.warning(block.error)
         else:
             await self._generate_with_retry(generator, ctx, block)
+
+        # L3: downgrade *before* returning to the engine. The breaker reads
+        # ``systemic_failure_reason(page)`` after compilation, so a recovered
+        # block must no longer carry a failure entry by then. Doing this here
+        # also keeps the retry budget honest: the replacement generator gets a
+        # fresh run rather than inheriting the failed one's retry count.
+        if block.status == BlockStatus.ERROR and downgrade_map:
+            await self._maybe_downgrade_block(
+                block,
+                ctx,
+                stream,
+                downgrade_map=downgrade_map,
+                persist=self._option("persist_after_each_block", True),
+                page=page,
+            )
 
         if block.status == BlockStatus.READY:
             await self._attach_bridge_text(
@@ -344,6 +390,74 @@ class BookCompiler:
             )
             await asyncio.sleep(delay)
             block.metadata["retry_attempts"] = attempt + 1
+
+    # ── Capability downgrade (L3) ──────────────────────────────────────
+
+    async def _maybe_downgrade_block(
+        self,
+        block: Block,
+        ctx: BlockContext,
+        stream: BookStream,
+        *,
+        downgrade_map: dict[BlockType, BlockType],
+        persist: bool,
+        page: Page,
+    ) -> None:
+        """Re-run a failed block as a more robust type, once, traceably.
+
+        Guards against chains and cycles: a block that already carries a
+        ``downgrade`` marker is never downgraded again, so a failing replacement
+        is reported honestly instead of silently morphing through the table.
+        """
+        target = downgrade_map.get(block.type)
+        metadata = block.metadata or {}
+        if target is None or target == block.type or metadata.get("downgrade"):
+            return
+        registry = getattr(self, "registry", None) or get_block_registry()
+        generator = registry.get(target)
+        if generator is None:
+            return
+
+        failure = dict(metadata.get("failure") or {})
+        original = block.type
+        reason = str(failure.get("message") or block.error or "generation failed")[:400]
+
+        block.type = target
+        block.status = BlockStatus.PENDING
+        block.payload = {}
+        block.error = ""
+        # Drop the old attempt bookkeeping; keep every other user/system field.
+        cleaned = {
+            key: value
+            for key, value in metadata.items()
+            if key not in ("failure", "retry_attempts", "generation_ms")
+        }
+        cleaned["downgrade"] = {
+            "original_type": original.value,
+            "downgraded_to": target.value,
+            "reason": reason,
+            "kind": str(failure.get("kind") or "generator_error"),
+            "at": time.time(),
+        }
+        block.metadata = cleaned
+
+        await stream.book_event(
+            "block_downgraded",
+            {
+                "page_id": page.id,
+                "block_id": block.id,
+                "original_type": original.value,
+                "type": target.value,
+                "reason": reason,
+            },
+            stage=STAGE_BLOCK,
+        )
+        logger.info(
+            f"block {block.id} downgraded {original.value} -> {target.value}: {reason}"
+        )
+        await self._generate_with_retry(generator, ctx, block)
+        if persist:
+            self.storage.save_page(page)
 
     # ── Bridge text attachment ─────────────────────────────────────────
 
@@ -424,6 +538,7 @@ class BookCompiler:
         allowed = _parse_allowed_block_types(
             (book.metadata or {}).get("block_types") if book is not None else None
         )
+        allowed = await self._capability_filtered_allowed(allowed, book)
         planned = await self.architect.plan_blocks_async(
             chapter,
             exploration=exploration,
@@ -448,6 +563,36 @@ class BookCompiler:
             },
             stage=STAGE_PAGE_PLAN,
         )
+
+    # ── Capability filtering (L3) ──────────────────────────────────────
+
+    async def _capability_filtered_allowed(
+        self, allowed: set[BlockType] | None, book: Any
+    ) -> set[BlockType] | None:
+        """Intersect a user allow-list with the types this install can render.
+
+        Returns ``allowed`` unchanged when nothing is unavailable, preserving
+        the pre-L3 ``None`` semantics (an absent allow-list means "use the full
+        template", not "use an allow-list of everything").
+        """
+        if not self._option("capability_probe", True):
+            return allowed
+        registry = getattr(self, "registry", None) or get_block_registry()
+        try:
+            results = await probe_registry(registry)
+            record_capabilities(book, self.storage, capabilities_snapshot(results, registry))
+        except Exception:  # noqa: BLE001
+            logger.debug("Capability probe failed; planning unfiltered", exc_info=True)
+            return allowed
+
+        available = {bt for bt, result in results.items() if result.available}
+        if not (PLANNABLE_BLOCK_TYPES - available):
+            return allowed
+        logger.info(
+            "Unavailable block types excluded from plan: %s",
+            sorted(bt.value for bt in PLANNABLE_BLOCK_TYPES - available),
+        )
+        return available if allowed is None else allowed & available
 
     # ── Status aggregation ─────────────────────────────────────────────
 
