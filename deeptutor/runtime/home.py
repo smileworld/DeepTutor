@@ -6,7 +6,30 @@ import os
 from pathlib import Path
 
 DEEPTUTOR_HOME_ENV = "DEEPTUTOR_HOME"
+RUNTIME_FLAG_ENV_PREFIX = "DEEPTUTOR_RUNTIME_"
+_TRUTHY_FLAG_VALUES = frozenset({"1", "true", "yes", "on"})
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
+
+
+def runtime_flag(name: str, *, default: bool = False) -> bool:
+    """Return a runtime feature flag without consulting any configuration file.
+
+    Bootstrap selects ``DEEPTUTOR_HOME`` before the settings stack is usable,
+    so a flag helper that imported ConfigManager / PathService / the catalog
+    would freeze the very thing the flag is meant to control. Flags are read
+    from the process environment on every call instead:
+
+        DEEPTUTOR_RUNTIME_<NAME>=1
+
+    Unknown or empty values keep *default*, which is ``False`` for every
+    gradual-rollout flag (L4b/L4c ship dark by default).
+    """
+
+    key = f"{RUNTIME_FLAG_ENV_PREFIX}{name.strip().upper()}"
+    raw = os.getenv(key)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in _TRUTHY_FLAG_VALUES
 
 
 def validate_runtime_home(home: str | Path) -> None:
@@ -52,7 +75,9 @@ def get_runtime_data_root(home: str | Path | None = None) -> Path:
 __all__ = [
     "DEEPTUTOR_HOME_ENV",
     "PACKAGE_ROOT",
+    "RUNTIME_FLAG_ENV_PREFIX",
     "get_runtime_home",
     "get_runtime_data_root",
+    "runtime_flag",
     "validate_runtime_home",
 ]

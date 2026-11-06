@@ -89,6 +89,11 @@ __all__ = [
     "ConfigTestRunner",
     "TestRun",
     "get_config_test_runner",
+    # From runtime_config.py (L4b)
+    "RuntimeConfig",
+    "get_runtime_config",
+    "invalidate_runtime_config",
+    "ssot_enabled",
     "HTTP_KEEP_ALIVE_TIMEOUT",
     "SETTINGS_DERIVED_ENV_KEYS",
     "ChatAttachmentLimits",
@@ -142,4 +147,12 @@ def __getattr__(name: str):
     if name in {"ConfigTestRunner", "TestRun", "get_config_test_runner"}:
         test_runner = importlib.import_module(f"{__name__}.test_runner")
         return getattr(test_runner, name)
+    if name in {
+        "RuntimeConfig",
+        "get_runtime_config",
+        "invalidate_runtime_config",
+        "ssot_enabled",
+    }:
+        runtime_config = importlib.import_module(f"{__name__}.runtime_config")
+        return getattr(runtime_config, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

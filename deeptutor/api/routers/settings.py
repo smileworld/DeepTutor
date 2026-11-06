@@ -555,6 +555,17 @@ def _runtime_catalog_write() -> Iterator[None]:
         "Admin applied catalog; resetting global LLM/embedding clients. "
         "In-flight user turns may flip backend client mid-call."
     )
+    from deeptutor.runtime.home import runtime_flag
+
+    if runtime_flag("ssot"):
+        # L4b: one broadcast instead of three ad-hoc resets. Dark by default;
+        # set DEEPTUTOR_RUNTIME_SSOT=1 to opt in, remove it to roll back.
+        from deeptutor.services.config.runtime_config import invalidate_runtime_config
+
+        report = invalidate_runtime_config(reason="catalog apply")
+        logger.warning("Unified runtime config invalidation report: %s", report)
+        return
+
     from deeptutor.services.embedding.client import reset_embedding_client
     from deeptutor.services.llm.client import reset_llm_client
 
