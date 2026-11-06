@@ -19,26 +19,46 @@ from deeptutor.services.keypool import primary_api_key
 
 from ..models import BlockType, SourceAnchor
 from ._prompts import get_book_prompt, load_book_prompts
-from .base import BlockContext, BlockGenerator, GenerationFailure
+from .base import BlockContext, BlockGenerator, GenerationFailure, ProbeResult
 
 logger = logging.getLogger(__name__)
+
+
+def _missing_dependency() -> str | None:
+    """Return a readable reason when math-animator extras are not installed."""
+    from deeptutor.modules.catalog import require_module
+
+    try:
+        require_module("renderer-manim")
+    except Exception as exc:  # ModuleUnavailable or a broken manifest
+        return f"module 'renderer-manim' unavailable: {exc}"
+    if importlib.util.find_spec("manim") is None:
+        return (
+            "AnimationGenerator requires the optional math-animator extras. "
+            "Install with `pip install -e '.[math-animator]'` "
+            "or `pip install -r requirements/math-animator.txt`."
+        )
+    return None
 
 
 class AnimationGenerator(BlockGenerator):
     block_type = BlockType.ANIMATION
 
+    async def probe(self, ctx: BlockContext | None = None) -> ProbeResult:
+        # L3: discover the missing dependency at planning time, so a page is
+        # never laid out with an animation block that cannot be rendered.
+        reason = _missing_dependency()
+        return ProbeResult(available=reason is None, reason=reason or "")
+
     async def _generate(
         self, ctx: BlockContext
     ) -> tuple[dict[str, Any], list[SourceAnchor], dict[str, Any]]:
-        from deeptutor.modules.catalog import require_module
-
-        require_module("renderer-manim")
-        if importlib.util.find_spec("manim") is None:
-            raise GenerationFailure(
-                "AnimationGenerator requires the optional math-animator extras. "
-                "Install with `pip install -e '.[math-animator]'` "
-                "or `pip install -r requirements/math-animator.txt`."
-            )
+        # Defence in depth: a stale capability cache or a direct
+        # ``change-block-type`` to animation must still fail with the helpful
+        # install hint instead of an opaque ImportError.
+        reason = _missing_dependency()
+        if reason:
+            raise GenerationFailure(reason)
 
         params = ctx.block.params
         chapter_title = params.get("chapter_title", ctx.chapter.title)

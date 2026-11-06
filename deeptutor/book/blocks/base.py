@@ -127,10 +127,33 @@ class BlockContext:
         return [ch for _, ch in scored[:limit]]
 
 
+@dataclass(frozen=True)
+class ProbeResult:
+    """Whether a generator can run in this installation/environment.
+
+    Capability probing (myDeeptutor L3) is deliberately *pre-generation*: an
+    optional dependency missing here must be discovered before the planner
+    emits a doomed block, not after a 200s LLM call dies inside ``_generate``.
+    """
+
+    available: bool = True
+    reason: str = ""
+
+
 class BlockGenerator(ABC):
     """Base class for all block generators."""
 
     block_type: BlockType  # subclasses MUST override
+
+    async def probe(self, ctx: BlockContext | None = None) -> ProbeResult:
+        """Return whether this generator can produce content right now.
+
+        The default is "yes": most generators only need the LLM, whose
+        availability is a provider concern and is handled by the retry/breaker
+        path. Generators with heavy local dependencies override this to keep
+        their block type out of the plan entirely.
+        """
+        return ProbeResult()
 
     async def generate(self, ctx: BlockContext) -> Block:
         """Public entry point. Wraps ``_generate`` with status book-keeping."""
@@ -190,6 +213,34 @@ class BlockGeneratorRegistry:
     def types(self) -> list[BlockType]:
         return list(self._registry.keys())
 
+    async def probe_all(
+        self, ctx: BlockContext | None = None
+    ) -> dict[BlockType, ProbeResult]:
+        """Probe every registered generator. A raising probe = unavailable.
+
+        Probing must never abort planning, so each generator is isolated. A
+        broken probe fails *closed* (mark unavailable) because the planner can
+        always fall back to a section block, whereas a generator that dies
+        mid-page costs a full retry cycle and trips the failure breaker.
+        """
+        results: dict[BlockType, ProbeResult] = {}
+        for block_type, generator in self._registry.items():
+            try:
+                results[block_type] = await generator.probe(ctx)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"Capability probe failed for {block_type.value}: {exc}",
+                    exc_info=True,
+                )
+                results[block_type] = ProbeResult(
+                    available=False, reason=f"probe raised: {exc}"
+                )
+        return results
+
+    async def available_types(self, ctx: BlockContext | None = None) -> set[BlockType]:
+        probed = await self.probe_all(ctx)
+        return {bt for bt, result in probed.items() if result.available}
+
 
 _REGISTRY: BlockGeneratorRegistry | None = None
 
@@ -242,5 +293,6 @@ __all__ = [
     "BlockGenerator",
     "BlockGeneratorRegistry",
     "GenerationFailure",
+    "ProbeResult",
     "get_block_registry",
 ]
