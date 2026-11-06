@@ -6,13 +6,80 @@ Service imports remain lazy so CLI/bootstrap can select DEEPTUTOR_HOME first.
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 import sys
+
+from deeptutor.runtime.home import (
+    DEEPTUTOR_HOME_ENV,
+    get_runtime_home,
+    runtime_flag,
+)
 
 logger = logging.getLogger(__name__)
 
 
+def rebind_import_time_paths(
+    *, enabled: bool | None = None, home: Path | None = None
+) -> list[str]:
+    """Refresh module-level paths that were frozen at import time (L4c).
+
+    ``loader.PROJECT_ROOT``, ``launch_settings.PROJECT_ROOT`` and
+    ``model_catalog.CATALOG_PATH`` are computed when their modules are first
+    imported. If the runtime home is selected later (launcher ``--home``,
+    CLI setup), those constants keep pointing at the old tree. This returns
+    the names of attributes actually rebound.
+
+    Only already-imported modules are touched: a reset must not pull the whole
+    settings stack in just to rebind a constant. Gated by
+    ``DEEPTUTOR_RUNTIME_SSOT`` (default off) because changing these globals
+    affects every caller in the process.
+    """
+
+    if enabled is None:
+        enabled = runtime_flag("ssot")
+    if not enabled:
+        return []
+
+    from deeptutor.services.path_service import get_path_service
+
+    resolved_home = home or get_runtime_home()
+    catalog_path = get_path_service().get_settings_file("model_catalog")
+    rebound: list[str] = []
+
+    for module_name in (
+        "deeptutor.services.config.loader",
+        "deeptutor.services.config.launch_settings",
+    ):
+        module = sys.modules.get(module_name)
+        if module is not None and hasattr(module, "PROJECT_ROOT"):
+            module.PROJECT_ROOT = resolved_home
+            rebound.append(f"{module_name}.PROJECT_ROOT")
+
+    catalog_module = sys.modules.get("deeptutor.services.config.model_catalog")
+    if catalog_module is not None:
+        catalog_module.CATALOG_PATH = catalog_path
+        rebound.append("deeptutor.services.config.model_catalog.CATALOG_PATH")
+
+    # __init__.py re-exports loader.PROJECT_ROOT as a package-level constant.
+    package = sys.modules.get("deeptutor.services.config")
+    if package is not None and hasattr(package, "PROJECT_ROOT"):
+        package.PROJECT_ROOT = resolved_home
+        rebound.append("deeptutor.services.config.PROJECT_ROOT")
+
+    return rebound
+
+
 def reset_runtime_singletons() -> None:
     """Refresh home-dependent caches, reporting failures without skipping peers."""
+    home = get_runtime_home()
+    logger.info(
+        "Runtime home resolved: %s (data root: %s; %s=%s)",
+        home,
+        home / "data",
+        DEEPTUTOR_HOME_ENV,
+        os.getenv(DEEPTUTOR_HOME_ENV) or "<unset>",
+    )
     try:
         from deeptutor.services.path_service import PathService
 
@@ -47,9 +114,8 @@ def reset_runtime_singletons() -> None:
     if sys.modules.get("deeptutor.multi_user.paths") is not None:
         try:
             from deeptutor.multi_user import paths
-            from deeptutor.runtime.home import get_runtime_home
 
-            paths.PROJECT_ROOT = get_runtime_home()
+            paths.PROJECT_ROOT = home
             paths.ADMIN_WORKSPACE_ROOT = paths.PROJECT_ROOT / "data"
             paths.USERS_ROOT = paths.ADMIN_WORKSPACE_ROOT / "users"
             paths.SYSTEM_ROOT = paths.ADMIN_WORKSPACE_ROOT / "system"
@@ -61,3 +127,14 @@ def reset_runtime_singletons() -> None:
                 "Multi-user path cache reset failed; owner paths may retain the previous runtime home",
                 exc_info=True,
             )
+
+    try:
+        rebound = rebind_import_time_paths(home=home)
+        if rebound:
+            logger.info("Rebound import-time config paths: %s", ", ".join(rebound))
+    except Exception:
+        logger.warning(
+            "Import-time config path rebind failed; frozen paths may still point "
+            "at the previous runtime home",
+            exc_info=True,
+        )
