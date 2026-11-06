@@ -1106,6 +1106,21 @@ async def get_catalog():
     return {"catalog": redact_catalog_secrets(get_model_catalog_service().load())}
 
 
+@router.get("/config-sources")
+async def get_config_sources():
+    """Read-only provenance snapshot for troubleshooting config disagreements.
+
+    Reports where each value came from (runtime home, per-user settings dir,
+    import-time catalog constant, process env, service caches) and the resolved
+    ``api_format`` chain. Observes only: no writes, no cache invalidation, and
+    no credentials in the payload.
+    """
+    _require_settings_admin()
+    from deeptutor.services.config.config_sources import collect_config_sources
+
+    return collect_config_sources()
+
+
 @router.get("/network")
 async def get_network_settings():
     _require_settings_admin()
