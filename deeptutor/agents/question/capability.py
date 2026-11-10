@@ -102,7 +102,16 @@ class DeepQuestionCapability(TurnCapability):
 
         mode = str(overrides.get("mode", "custom") or "custom").strip().lower()
         topic = str(overrides.get("topic") or context.user_message or "").strip()
-        num_questions = int(overrides.get("num_questions", 1) or 1)
+        # Local hardening: ``num_questions`` and ``max_questions`` used to be
+        # read independently, so a request for 30 questions silently bypassed
+        # the configured ceiling of 10.  Clamp once so every downstream phase
+        # (custom + mimic) sees a bounded request.
+        from deeptutor.runtime.agentic.turn_budget import clamp_question_count
+
+        num_questions, _max_questions = clamp_question_count(
+            overrides.get("num_questions", 1),
+            overrides.get("max_questions", 10),
+        )
         difficulty = str(overrides.get("difficulty", "") or "")
         raw_types = overrides.get("question_types") or []
         question_types = list(raw_types) if isinstance(raw_types, list) else []

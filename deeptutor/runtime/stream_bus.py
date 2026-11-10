@@ -55,11 +55,32 @@ class StreamBus:
         self._max_history = max_history
         self._assign_seq = assign_seq
         self._next_seq = 1
+        # Optional local-hardening cap. ``None`` means unlimited, which keeps
+        # every existing caller's behaviour unchanged.
+        self._thinking_limit: int | None = None
+        self._thinking_seen = 0
 
     @property
     def latest_seq(self) -> int:
         """Largest sequence issued by this bus, or zero before its first event."""
         return self._next_seq - 1 if self._assign_seq else 0
+
+    @property
+    def thinking_dropped(self) -> int:
+        """Number of thinking chunks suppressed by the optional cap."""
+        if self._thinking_limit is None:
+            return 0
+        return max(0, self._thinking_seen - self._thinking_limit)
+
+    def set_thinking_limit(self, limit: int | None) -> None:
+        """Cap ``THINKING`` events emitted by this bus.
+
+        Only thinking chunks are affected: content, progress, result and error
+        events are never dropped, so a capped turn still produces a complete,
+        renderable answer.  Pass ``None`` to disable the cap.
+        """
+        self._thinking_limit = max(0, int(limit)) if limit is not None else None
+        self._thinking_seen = 0
 
     @property
     def result_completion(self) -> bool | None:
@@ -97,6 +118,10 @@ class StreamBus:
         """Push *event* to every active subscriber."""
         if self._closed:
             return
+        if event.type == StreamEventType.THINKING and self._thinking_limit is not None:
+            self._thinking_seen += 1
+            if self._thinking_seen > self._thinking_limit:
+                return
         if self._assign_seq:
             event.seq = self._next_seq
             self._next_seq += 1

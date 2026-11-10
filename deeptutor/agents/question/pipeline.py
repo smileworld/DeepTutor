@@ -584,9 +584,40 @@ class QuestionPipeline:
                 )
 
         # ----- Phase 3: Quiz (per-question) -----
+        # Local hardening: bound the aggregate cost of one user turn.  Thinking
+        # is streamed one event per provider chunk, so an unbounded request can
+        # emit tens of thousands of events and saturate the frontend.  Check
+        # between questions (never mid-question) so a stopped turn always
+        # contains only fully generated questions and degrades gracefully.
+        from deeptutor.runtime.agentic.turn_budget import TurnBudget, stop_notice
+
+        budget = TurnBudget.from_env(
+            requested_questions=num_questions,
+            events_at_start=getattr(stream, "latest_seq", 0) or 0,
+        )
+        set_thinking_limit = getattr(stream, "set_thinking_limit", None)
+        if set_thinking_limit is not None:
+            set_thinking_limit(budget.max_thinking_events)
+
         qa_pairs: list[QuizPair] = []
+        stop_reason: str | None = None
         async with stream.stage(STAGE_QUIZZING, source=SOURCE):
             for index, template in enumerate(plan.templates):
+                stop_reason = budget.check(
+                    latest_seq=getattr(stream, "latest_seq", 0) or 0,
+                )
+                if stop_reason:
+                    await stream.progress(
+                        stop_notice(stop_reason, self.language),
+                        source=SOURCE,
+                        stage=STAGE_QUIZZING,
+                        metadata={
+                            "trace_kind": "warning",
+                            "budget_exceeded": stop_reason,
+                            "questions_done": budget.questions_done,
+                        },
+                    )
+                    break
                 qa_pair = await self._quiz_one(
                     template=template,
                     question_number=index + 1,
@@ -606,11 +637,18 @@ class QuestionPipeline:
                     total=len(plan.templates),
                 )
                 qa_pairs.append(qa_pair)
+                budget.questions_done += 1
 
         # ----- Result envelope -----
         result_payload = self._build_result_payload(
             plan, qa_pairs, is_mimic=is_mimic, finish_text=finish_text
         )
+        if stop_reason:
+            summary = result_payload.get("summary")
+            if isinstance(summary, dict):
+                summary["truncated"] = True
+                summary["generated"] = len(qa_pairs)
+                summary["budget_stop_reason"] = stop_reason
         await emit_capability_result(stream, result_payload, source=SOURCE, usage=self.usage)
         return result_payload
 
