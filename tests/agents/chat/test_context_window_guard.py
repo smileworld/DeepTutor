@@ -104,18 +104,21 @@ def test_estimate_counts_tool_call_arguments_like_history_planning() -> None:
 
 
 @pytest.mark.asyncio
-async def test_guard_warns_and_proceeds_when_nothing_is_left_to_trim(caplog) -> None:
+async def test_guard_hard_trims_when_no_tool_results_are_left_to_trim(caplog) -> None:
+    """Local hardening: an oversized request is no longer sent unchanged."""
     pipeline = _pipeline()
     messages: list[dict[str, Any]] = [{"role": "user", "content": _text(BUDGET + 1000)}]
-    before = copy.deepcopy(messages)
     caplog.clear()
 
     with caplog.at_level(logging.WARNING, logger="deeptutor.agents.loop.pipeline"):
         await pipeline._guard_context_window(messages, StreamBus())
 
-    assert messages == before
-    assert any(
-        "no tool results are left to trim" in record.getMessage() for record in caplog.records
+    assert len(messages) == 1
+    assert messages[0]["content"] != _text(BUDGET + 1000)
+    assert pipeline._estimate_messages_tokens(messages) <= BUDGET
+    assert any("hard-trimmed" in record.getMessage() for record in caplog.records)
+    assert not any(
+        "sending it as-is" in record.getMessage() for record in caplog.records
     )
 
 

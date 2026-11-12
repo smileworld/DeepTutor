@@ -418,6 +418,16 @@ class AgenticLoopPipeline:
         return self.respond_max_tokens
 
     async def run(self, context: UnifiedContext, stream: StreamBus) -> dict[str, Any]:
+        # Local hardening: the provider streams reasoning one event per chunk.
+        # Cap it for every exploring-loop turn (chat and the deep modes), not
+        # just deep_question.  Only THINKING is suppressed, so a capped turn
+        # still produces a complete, renderable answer.
+        from deeptutor.runtime.agentic.turn_budget import thinking_event_limit_from_env
+
+        apply_thinking_limit = getattr(stream, "set_thinking_limit", None)
+        if apply_thinking_limit is not None:
+            apply_thinking_limit(thinking_event_limit_from_env())
+
         if context.runtime.workspace is None:
             from deeptutor.services.workspace import get_content_workspace_service
 
@@ -1832,20 +1842,64 @@ class AgenticLoopPipeline:
             counts[index] = after
             if total <= budget:
                 break
+        # Local hardening: a context window is a physical limit, not a warning.
+        # Once tool results are snipped, anything still over budget is hard-trimmed
+        # on this transient request copy instead of being sent as-is.
+        from deeptutor.runtime.agentic.context_guard import hard_trim_to_budget
+
+        report = None
         if total > budget:
+            report = hard_trim_to_budget(
+                messages,
+                count=self._request_message_tokens,
+                counts=counts,
+                total=total,
+                budget=budget,
+            )
             logger.warning(
-                "Context-window guard: request is about %d tokens against a %d-token budget "
-                "(window %d) and no tool results are left to trim; sending it as-is",
-                total,
+                "Context-window guard: hard-trimmed %d message(s), shortened %d "
+                "(%d chars); request is now about %d tokens against a %d-token "
+                "budget (window %d)%s",
+                report.dropped_messages,
+                report.truncated_messages,
+                report.dropped_chars,
+                report.final_tokens,
                 budget,
                 window,
+                "" if report.within_budget else "; still over budget after best effort",
             )
-        if snipped:
+        hard_trimmed = bool(report is not None and report.changed)
+        if snipped or hard_trimmed:
+            metadata: dict[str, Any] = {"trace_kind": "warning"}
+            if hard_trimmed and report is not None:
+                metadata.update(
+                    {
+                        "hard_trimmed": True,
+                        "dropped_messages": report.dropped_messages,
+                        "truncated_messages": report.truncated_messages,
+                        "final_tokens": report.final_tokens,
+                        "budget": budget,
+                        "within_budget": report.within_budget,
+                    }
+                )
+            notice = (
+                self._t(
+                    "notices.context_window_hard_trim",
+                    default=(
+                        "已裁剪较早的对话与工具结果，确保本轮请求在模型上下文窗口内。"
+                        if str(self.language).lower().startswith("zh")
+                        else "Trimmed earlier dialogue and tool results to fit this "
+                        "request within the model's context window."
+                    ),
+                )
+                if hard_trimmed
+                else self._t("notices.context_window_guard")
+            )
             await stream.progress(
-                self._t("notices.context_window_guard"),
+                notice,
                 source=self.event_source,
                 stage=self.event_stage,
-                metadata={"trace_kind": "warning"},
+                metadata=metadata,
             )
 
     def measure_context_budget(self, request: LLMRequestSnapshot) -> dict[str, Any] | None:

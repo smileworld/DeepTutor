@@ -61,6 +61,16 @@ def _env_float(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
+def thinking_event_limit_from_env() -> int:
+    """Cap for ``THINKING`` events on a turn-scoped stream bus.
+
+    Shared by every exploring-loop turn (chat and the deep modes) so a single
+    request cannot persist tens of thousands of reasoning chunks.  The cap only
+    suppresses THINKING events; content, progress, result and error survive.
+    """
+    return _env_int("MAX_THINKING_EVENTS", DEFAULT_MAX_THINKING_EVENTS)
+
+
 def clamp_question_count(raw_num: Any, raw_max: Any = 10) -> tuple[int, int]:
     """Return ``(effective_num, effective_max)``.
 
@@ -183,4 +193,5 @@ __all__ = [
     "TurnBudget",
     "clamp_question_count",
     "stop_notice",
+    "thinking_event_limit_from_env",
 ]
