@@ -36,7 +36,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 import re
-from typing import Any
+from typing import Any, Callable
 
 from deeptutor.core.trace import merge_trace_metadata
 from deeptutor.runtime.agentic.labels import (
@@ -157,6 +157,8 @@ async def run_labeled_step(
     final_meta: dict[str, Any] | None = None,
     eager_sub_trace: bool = False,
     implicit_think_label: str | None = None,
+    context_guard: Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], Any]
+    | None = None,
 ) -> LabeledStepResult:
     """Drive one streaming LLM call under the label protocol.
 
@@ -194,6 +196,20 @@ async def run_labeled_step(
     if tool_schemas:
         kwargs["tools"] = tool_schemas
         kwargs["tool_choice"] = "auto"
+
+    # Local hardening: bound the *whole* request immediately before it leaves.
+    # Guard a per-request copy so the caller's durable message history (which
+    # the loop keeps appending to) is never dropped or shortened. Only swap the
+    # copy in when the guard actually changed something: an in-budget request
+    # must keep the caller's exact list so existing fallback paths (and callers
+    # that inspect it) behave as before. The image fallback below still strips
+    # the original list when a guarded copy was used, so later iterations do
+    # not re-send unsupported images.
+    if context_guard is not None:
+        guarded_messages = [dict(message) for message in messages]
+        outcome = context_guard(guarded_messages, tool_schemas)
+        if getattr(outcome, "changed", True):
+            kwargs["messages"] = guarded_messages
 
     label: str | None = None
     label_buf = ""
@@ -485,6 +501,8 @@ async def run_labeled_step(
                 binding, model, kwargs.get("messages") or []
             ):
                 strip_image_parts_inplace(kwargs["messages"])
+                if kwargs["messages"] is not messages:
+                    strip_image_parts_inplace(messages)
                 await stream.progress(
                     "Model does not support image input; retrying without images.",
                     source=source,

@@ -733,6 +733,7 @@ class QuestionPipeline:
             usage=self.usage,
             stream_body_live=True,
             eager_sub_trace=True,
+            context_guard=self._request_context_guard(),
         )
         finish_text = (outcome.final_text or "").strip()
         exploration_trace = self._render_exploration_trace(
@@ -975,6 +976,7 @@ class QuestionPipeline:
             usage=self.usage,
             stream_body_live=False,
             eager_sub_trace=True,
+            context_guard=self._request_context_guard(),
         )
         payload = self._parse_quiz_payload(outcome.final_text)
         normalized = self._normalize_quiz_payload(template, payload)
@@ -1150,6 +1152,11 @@ class QuestionPipeline:
             ),
         }
         kwargs["stream_options"] = {"include_usage": True}
+        # The tool summariser bypasses ``run_labeled_step``, so apply the same
+        # request-level guard here. It has no tool schemas of its own.
+        guarded_messages = [dict(message) for message in messages]
+        if self._request_context_guard()(guarded_messages, None).changed:
+            kwargs["messages"] = guarded_messages
 
         chunks: list[str] = []
         # Keep the latest usage frame only — some providers emit usage on
@@ -1840,6 +1847,26 @@ class QuestionPipeline:
             reasoning_effort=reasoning_effort or self.reasoning_effort,
         )
 
+    def _request_context_guard(self) -> Any:
+        """Per-request window guard shared by every LLM call in this pipeline.
+
+        Explore / quiz loops and one-shot labeled steps all converge on
+        ``run_labeled_step``; the tool summariser calls the client directly.
+        Both must bound the *outgoing request*, not the durable loop history —
+        an exploring turn can accumulate tens of thousands of tokens across
+        iterations, and a 45k-token request is what made ``deep_question``
+        stall on 2026-11-15. Trimming only the request copy keeps each round
+        inside the model window while leaving the loop's own context intact.
+        """
+        from deeptutor.runtime.agentic.context_guard import request_guard_callback
+
+        return request_guard_callback(
+            model=str(self.model or ""),
+            llm_config=self.llm_config,
+            scope=SOURCE,
+            logger=logger,
+        )
+
     async def _run_labeled_step(
         self,
         *,
@@ -1874,6 +1901,7 @@ class QuestionPipeline:
             usage=self.usage,
             final_meta=final_meta,
             eager_sub_trace=eager_sub_trace,
+            context_guard=self._request_context_guard(),
         )
 
     # ------------------------------------------------------------------
@@ -2117,8 +2145,12 @@ class _BaseLoopHost:
         self._client = client
 
     async def guard_context_window(self, messages: list[dict[str, Any]]) -> None:
-        # v1 doesn't run an in-loop trimmer for the quiz pipeline. Per-phase
-        # message buffers are bounded by max_iterations × per-call size.
+        # Intentionally a no-op: trimming here would mutate the loop's durable
+        # history, which later iterations still need. The request-level window
+        # guard is installed on ``run_labeled_step`` via
+        # ``QuestionPipeline._request_context_guard`` and acts on a per-request
+        # copy instead. The old "bounded by max_iterations × per-call size"
+        # assumption was disproved by a 45,862-token deep_question request.
         return
 
     async def dispatch_tools(

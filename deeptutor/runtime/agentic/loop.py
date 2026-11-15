@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from deeptutor.runtime.agentic.labeled_step import LabeledStepResult, run_labeled_step
 from deeptutor.runtime.agentic.labels import LABEL_UNKNOWN, find_inline_labels
@@ -193,6 +193,11 @@ async def run_agentic_loop(
     stream_body_live: bool = False,
     eager_sub_trace: bool = False,
     implicit_think_label: str | None = None,
+    # Request-level window guard applied to a per-request copy inside
+    # ``run_labeled_step``. Unlike ``LoopHost.guard_context_window`` this never
+    # truncates the durable history the loop keeps appending to.
+    context_guard: Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], Any]
+    | None = None,
 ) -> LoopOutcome:
     """Run a label-driven LLM loop until a terminal label fires or the
     iteration budget is exhausted.
@@ -257,6 +262,7 @@ async def run_agentic_loop(
             final_meta=final_meta if stream_body_live else None,
             eager_sub_trace=eager_sub_trace,
             implicit_think_label=implicit_think_label,
+            context_guard=context_guard,
         )
         iterations_run += 1
 

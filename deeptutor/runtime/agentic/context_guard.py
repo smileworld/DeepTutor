@@ -29,7 +29,7 @@ Safety rules
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 TRIM_PREFIX = "[earlier text trimmed to fit the model's context window]\n"
@@ -198,4 +198,197 @@ def hard_trim_to_budget(
     return result
 
 
-__all__ = ["TRIM_PREFIX", "TrimResult", "hard_trim_to_budget"]
+DEFAULT_GUARD_RATIO = 0.9
+DEFAULT_TOOL_RESULT_MARKER = (
+    "[earlier tool result snipped to stay within context window; "
+    "call the same tool again if the content is still needed]"
+)
+
+
+def default_message_token_count(message: dict[str, Any]) -> int:
+    """Count one message the same way history planning counts it."""
+    from deeptutor.services.session.context_builder import _count_model_context_tokens
+
+    # ``_context_snapshot`` is bookkeeping stripped before the provider sees it.
+    sent = {key: value for key, value in message.items() if key != "_context_snapshot"}
+    return _count_model_context_tokens(sent)
+
+
+@dataclass(slots=True)
+class GuardOutcome:
+    """What one request-level guard pass did, for logging and progress notices."""
+
+    window: int = 0
+    budget: int = 0
+    before_tokens: int = 0
+    snipped: int = 0
+    report: TrimResult = field(default_factory=TrimResult)
+
+    @property
+    def hard_trimmed(self) -> bool:
+        return self.report.changed
+
+    @property
+    def changed(self) -> bool:
+        return self.snipped > 0 or self.hard_trimmed
+
+    @property
+    def final_tokens(self) -> int:
+        return self.report.final_tokens
+
+    @property
+    def within_budget(self) -> bool:
+        return self.report.within_budget
+
+
+def apply_request_guard(
+    messages: list[dict[str, Any]],
+    *,
+    model: str,
+    context_window: Any = None,
+    max_tokens: Any = None,
+    tool_schemas: list[dict[str, Any]] | None = None,
+    ratio: float = DEFAULT_GUARD_RATIO,
+    snip_marker: str | None = None,
+    count: Callable[[dict[str, Any]], int] | None = None,
+) -> GuardOutcome:
+    """Make ``messages`` fit the model window, in place, before it is sent.
+
+    This is the single shared implementation used by the chat agent loop and
+    by the standalone question / research pipelines.  ``messages`` must be the
+    transient request copy — durable conversation history is never mutated.
+
+    Phases: snip old tool results, drop whole historical chunks, then shorten
+    oversized text.  Tool schemas are counted as fixed overhead so the *whole*
+    request, not just its message body, is bounded.
+    """
+    from deeptutor.services.llm.context_window import resolve_effective_context_window
+    from deeptutor.services.session.context_builder import _count_model_context_tokens
+
+    counter = count or default_message_token_count
+    try:
+        window = resolve_effective_context_window(
+            context_window=context_window, model=model, max_tokens=max_tokens
+        )
+    except Exception:
+        window = 0
+    if not window or window <= 0:
+        return GuardOutcome(report=TrimResult(within_budget=True))
+
+    budget = max(1, int(window * ratio))
+    overhead = _count_model_context_tokens(tool_schemas) if tool_schemas else 0
+    counts = [counter(message) for message in messages]
+    total = sum(counts) + overhead
+    outcome = GuardOutcome(
+        window=window,
+        budget=budget,
+        before_tokens=total,
+        report=TrimResult(
+            final_tokens=total, budget=budget, within_budget=total <= budget
+        ),
+    )
+    if total <= budget:
+        return outcome
+
+    marker = snip_marker or DEFAULT_TOOL_RESULT_MARKER
+    for index, message in enumerate(messages):
+        if message.get("role") != "tool" or message.get("content") == marker:
+            continue
+        message["content"] = marker
+        outcome.snipped += 1
+        after = counter(message)
+        total += after - counts[index]
+        counts[index] = after
+        if total <= budget:
+            break
+
+    if total > budget:
+        outcome.report = hard_trim_to_budget(
+            messages,
+            count=counter,
+            counts=counts,
+            total=total,
+            budget=budget,
+        )
+    else:
+        outcome.report = TrimResult(
+            final_tokens=total, budget=budget, within_budget=True
+        )
+    return outcome
+
+
+def log_request_guard(outcome: GuardOutcome, *, scope: str, logger: Any) -> None:
+    """Emit one consistent warning for capabilities without a progress bus."""
+    if not outcome.changed:
+        return
+    report = outcome.report
+    logger.warning(
+        "Context-window guard [%s]: hard-trimmed %d message(s), shortened %d "
+        "(%d chars), snipped %d tool result(s); request is now about %d tokens "
+        "against a %d-token budget (window %d, before %d)%s",
+        scope,
+        report.dropped_messages,
+        report.truncated_messages,
+        report.dropped_chars,
+        outcome.snipped,
+        outcome.final_tokens,
+        outcome.budget,
+        outcome.window,
+        outcome.before_tokens,
+        "" if outcome.within_budget else "; still over budget after best effort",
+    )
+
+
+def request_guard_callback(
+    *,
+    model: str,
+    llm_config: Any = None,
+    scope: str,
+    logger: Any,
+    ratio: float = DEFAULT_GUARD_RATIO,
+    snip_marker: str | None = None,
+    count: Callable[[dict[str, Any]], int] | None = None,
+) -> Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], GuardOutcome]:
+    """Build the ``context_guard`` callback accepted by ``run_labeled_step``.
+
+    ``run_labeled_step`` invokes it on a per-request copy of the messages just
+    before the provider call, so the capability's durable history (which the
+    agentic loop keeps appending to) is never trimmed. The returned callback
+    reports its :class:`GuardOutcome` so the caller can decide whether the
+    copy actually needs to replace the outgoing request.
+    """
+    context_window = getattr(llm_config, "context_window", None)
+    max_tokens = getattr(llm_config, "max_tokens", None)
+
+    def _guard(
+        messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]] | None,
+    ) -> GuardOutcome:
+        outcome = apply_request_guard(
+            messages,
+            model=model,
+            context_window=context_window,
+            max_tokens=max_tokens,
+            tool_schemas=tool_schemas,
+            ratio=ratio,
+            snip_marker=snip_marker,
+            count=count,
+        )
+        log_request_guard(outcome, scope=scope, logger=logger)
+        return outcome
+
+    return _guard
+
+
+__all__ = [
+    "DEFAULT_GUARD_RATIO",
+    "DEFAULT_TOOL_RESULT_MARKER",
+    "TRIM_PREFIX",
+    "GuardOutcome",
+    "TrimResult",
+    "apply_request_guard",
+    "default_message_token_count",
+    "hard_trim_to_budget",
+    "log_request_guard",
+    "request_guard_callback",
+]

@@ -838,6 +838,7 @@ class ResearchPipeline:
                 # THINK iters still get a card the moment their first
                 # thinking chunk arrives.
                 eager_sub_trace=False,
+                context_guard=self._request_context_guard(),
             )
         except Exception as exc:
             logger.warning("Rephrase loop failed; falling back to raw topic: %s", exc)
@@ -1030,6 +1031,7 @@ class ResearchPipeline:
                 usage=self.usage,
                 stream_body_live=False,
                 eager_sub_trace=True,
+                context_guard=self._request_context_guard(),
             )
         except Exception as exc:
             logger.exception("Research block %s failed: %s", block.block_id, exc)
@@ -1258,6 +1260,12 @@ class ResearchPipeline:
         messages = self._build_system_user_messages(system_prompt, user_prompt)
         try:
             kwargs = self._completion_kwargs(self._budgets["note"]["max_tokens"])
+            # The note summariser bypasses ``run_labeled_step``; apply the same
+            # request-level guard to a copy so the raw answer stays available
+            # for the fallback path below.
+            guarded_messages = [dict(message) for message in messages]
+            if self._request_context_guard()(guarded_messages, None).changed:
+                messages = guarded_messages
             response = await client.chat.completions.create(
                 model=self.model, messages=messages, stream=False, **kwargs
             )
@@ -2270,6 +2278,23 @@ class ResearchPipeline:
             reasoning_effort=reasoning_effort or self.reasoning_effort,
         )
 
+    def _request_context_guard(self) -> Any:
+        """Per-request window guard shared by every LLM call in this pipeline.
+
+        Rephrase / block loops and one-shot labeled steps all converge on
+        ``run_labeled_step``; the note summariser calls the client directly.
+        Both must bound the outgoing request instead of the durable loop
+        history, which later iterations and citation assembly still need.
+        """
+        from deeptutor.runtime.agentic.context_guard import request_guard_callback
+
+        return request_guard_callback(
+            model=str(self.model or ""),
+            llm_config=self.llm_config,
+            scope=SOURCE,
+            logger=logger,
+        )
+
     async def _run_labeled_step(
         self,
         *,
@@ -2305,6 +2330,7 @@ class ResearchPipeline:
             usage=self.usage,
             final_meta=final_meta,
             eager_sub_trace=eager_sub_trace,
+            context_guard=self._request_context_guard(),
         )
 
     # ------------------------------------------------------------------
@@ -2730,7 +2756,11 @@ class _BlockLoopHost:
         self._tool_rounds_used = 0
 
     async def guard_context_window(self, messages: list[dict[str, Any]]) -> None:
-        # Per-block budgets keep messages bounded; no trimming for v1.
+        # Intentionally a no-op. Per-block budgets bound the *iteration count*,
+        # not the token count of an accumulated history; trimming here would
+        # also mutate the loop's durable messages. The request-level guard is
+        # installed on ``run_labeled_step`` via
+        # ``ResearchPipeline._request_context_guard`` and acts on a copy.
         return None
 
     def build_iteration_trace_meta(self, iteration: int) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -3083,6 +3113,9 @@ class _RephraseLoopHost:
         self._shared_iter_call_id = new_call_id("research-rephrase-iter")
 
     async def guard_context_window(self, messages: list[dict[str, Any]]) -> None:
+        # No-op by design: the outgoing request is bounded by
+        # ``ResearchPipeline._request_context_guard`` on a per-request copy,
+        # so the durable rephrase history stays intact across iterations.
         return None
 
     def build_iteration_trace_meta(self, iteration: int) -> tuple[dict[str, Any], dict[str, Any]]:
